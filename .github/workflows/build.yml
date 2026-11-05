@@ -20,15 +20,30 @@ jobs:
 
     - name: Build Rootfs
       run: |
-        # 【终极斩草除根】直接删掉引起报错的初始化，让静态变量默认归零
-        find . -name "calls.c" -exec sed -i '' 's/g_timer_tick_hook = NULL;//g' {} \;
-        find . -name "calls.c" -exec sed -i '' 's/g_timer_tick_hook = 0;//g' {} \;
+        # 【第一步：用 Python 智能修补 C 语言源代码】
+        python3 -c '
+        import re
+        file_path = "kernel/calls.c"
+        with open(file_path, "r") as f:
+            code = f.read()
+            
+        # 1. 精准恢复被破坏的变量声明，并去掉非法的 = 0
+        code = re.sub(r"static _Atomic\(ish_timer_tick_hook_t\)\s*g_timer_tick_hook\s*(=\s*[^;]+)?;", "static _Atomic(ish_timer_tick_hook_t) g_timer_tick_hook;", code)
         
-        # 强行忽略所有警告
+        # 2. 修复静态与非静态声明冲突（删掉函数前面的 static）
+        code = code.replace("static void ish_set_timer_tick_hook", "void ish_set_timer_tick_hook")
+        
+        with open(file_path, "w") as f:
+            f.write(code)
+        print("代码修补完成！")
+        '
+        
+        # 【第二步：强行忽略所有烦人的报错警告】
         find . -type f \( -name "*.txt" -o -name "*.mk" -o -name "*.build" -o -name "*.ninja" -o -name "Makefile" \) -exec sed -i '' 's/-Werror//g' {} \;
         export CFLAGS="-Wno-everything -w"
         export CXXFLAGS="-Wno-everything -w"
         
+        # 【第三步：开始编译】
         make rootfs
 
     - name: Build Xcode Project
