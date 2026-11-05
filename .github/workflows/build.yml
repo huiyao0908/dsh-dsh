@@ -4,124 +4,96 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-rootfs:
-    # 仅公开仓库免费；私有仓库改成 ubuntu-latest
-    runs-on: ubuntu-24.04-arm
+  build:
+    runs-on: macos-26
+    timeout-minutes: 90
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      # TODO: 如果有修复 C 代码的 Python 补丁脚本，放在这里执行
-
-      - name: Install dependencies
+      - name: Select Xcode
         run: |
-          sudo apt-get update
-          sudo apt-get install -y meson ninja-build clang gcc g++ make python3 \
-            curl tar xz-utils git libarchive-dev libsqlite3-dev lld llvm
-          which ld.lld clang
-          ld.lld --version
+          ls /Applications | grep -i xcode || true
+          sudo xcode-select -s /Applications/Xcode_26.6.app || true
+          xcodebuild -version
 
-      - name: Build Rootfs
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install toolchain
+        run: |
+          brew install meson ninja lld
+          echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
+          sudo gem install xcodeproj
+
+      - name: Apply source patches
+        run: |
+          set -eu
+          # 1) Apple Clang: _Atomic 静态变量不能用 = NULL 初始化
+          sed -i '' -E 's/^static _Atomic\(([^)]*)\) ([A-Za-z0-9_]+) = NULL;/static _Atomic(\1) \2;/' \
+            ish-arm64/fs/fake.c ish-arm64/kernel/calls.c ish-arm64/kernel/fork.c
+          # 2) 主机名过长会溢出
+          sed -i '' 's|strcpy(uts->hostname, hostname);|snprintf(uts->hostname, sizeof(uts->hostname), "%s", hostname);|' \
+            ish-arm64/kernel/uname.c
+          # 检查补丁是否生效
+          grep -n "static _Atomic" ish-arm64/fs/fake.c ish-arm64/kernel/calls.c ish-arm64/kernel/fork.c
+          grep -n "hostname" ish-arm64/kernel/uname.c
+
+      - name: Build emulator and rootfs
         shell: bash
         run: |
-          touch .ci-start
-          mkdir -p ci-out
-
-          set +e
+          set -o pipefail
+          make emulator 2>&1 | tee emulator-build.log
           make rootfs 2>&1 | tee rootfs-build.log
-          MAKE_STATUS=${PIPESTATUS[0]}
-          set -e
-          echo "=== make exit status: $MAKE_STATUS ==="
+          ls -lh build/root.tar.gz
 
-          # 收集本次新生成的 tar 包
-          find . -type f \( -name '*.tar' -o -name '*.tar.*' -o -name '*.tgz' \) \
-            -newer .ci-start \
-            -not -path '*/node_modules/*' -not -path './ci-out/*' -not -path './.git/*' \
-            -exec cp -v {} ci-out/ \;
-
-          # 如果产物是 fakefs 目录（含 meta.db），打成 tar
-          for db in $(find . -name meta.db -newer .ci-start \
-                        -not -path '*/node_modules/*' -not -path './.git/*' 2>/dev/null); do
-            d=$(dirname "$db")
-            tar -C "$(dirname "$d")" -cf "ci-out/fakefs-$(basename "$d").tar" "$(basename "$d")"
-          done
-
-          echo "=== ci-out ==="
-          ls -lh ci-out || true
-          exit $MAKE_STATUS
-
-      - name: Upload Rootfs Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: rootfs-tar
-          path: ci-out/
-          if-no-files-found: error
-
-      - name: Upload Rootfs Build Log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: rootfs-build-log
-          path: rootfs-build.log
-          if-no-files-found: ignore
-
-  build-ios:
-    needs: build-rootfs
-    runs-on: macos-14
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Download Rootfs Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: rootfs-tar
-          path: rootfs-artifact/
-
-      - name: Place Rootfs and Inspect
+      - name: Archive unsigned
         shell: bash
         run: |
-          ls -R rootfs-artifact | head -50
-          mkdir -p ish-arm64/build-arm64-release
-          cp -R rootfs-artifact/. ish-arm64/build-arm64-release/
-          ls -lh ish-arm64/build-arm64-release | head -50
-          grep -n "rootfs\|fakefs" DSH.xcodeproj/project.pbxproj | head -30 || true
-
-      # TODO: 如果 Xcode 工程需要 macOS 上 meson 编出的 libish.a 等库，
-      #       把之前能跑通的 meson/ninja 步骤放在这里
-
-      - name: Compile Xcode Project
-        shell: bash
-        run: |
-          xcodebuild -project DSH.xcodeproj -scheme DSH \
-            -sdk iphoneos -configuration Release \
-            CODE_SIGNING_ALLOWED=NO -derivedDataPath build \
+          set -o pipefail
+          xcodebuild archive \
+            -project DSH.xcodeproj -scheme DSH -configuration Release \
+            -archivePath build/DSH.xcarchive \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            DSH_DEVELOPMENT_TEAM="" CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
             2>&1 | tee xcodebuild.log
 
-      - name: Package Unsigned IPA
-        shell: bash
+      - name: Package IPA
         run: |
-          APP=$(find build/Build/Products -maxdepth 2 -name 'DSH.app' | head -n 1)
-          echo "App: $APP"
-          mkdir -p Payload
-          cp -R "$APP" Payload/
-          zip -qr DSH-Unsigned.ipa Payload
+          set -euo pipefail
+          APP="build/DSH.xcarchive/Products/Applications/DSH.app"
+          test -d "$APP"
+          test ! -e "$APP/_CodeSignature"
+          test ! -e "$APP/embedded.mobileprovision"
+          rm -rf build/Payload build/DSH-unsigned.ipa
+          mkdir -p build/Payload
+          cp -R "$APP" build/Payload/
+          cd build
+          zip -qr DSH-unsigned.ipa Payload
+          unzip -tq DSH-unsigned.ipa
 
-      - name: Upload IPA Artifact
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: DSH-Unsigned-IPA
-          path: DSH-Unsigned.ipa
+          name: DSH-unsigned-ipa
+          path: build/DSH-unsigned.ipa
           if-no-files-found: error
 
-      - name: Upload Xcode Log
+      - name: Crash reports (on failure)
+        if: failure()
+        run: cat ~/Library/Logs/DiagnosticReports/*.ips 2>/dev/null | head -300 || true
+
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: xcodebuild-log
-          path: xcodebuild.log
+          name: build-logs
+          path: |
+            emulator-build.log
+            rootfs-build.log
+            xcodebuild.log
           if-no-files-found: ignore
