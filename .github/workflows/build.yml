@@ -4,70 +4,57 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: macos-14
-    
+  # ==========================================
+  # 第一个任务：在 Ubuntu 上跑 Docker 构造完美的 Linux 环境
+  # ==========================================
+  build-alpine:
+    runs-on: ubuntu-latest
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
       with:
         submodules: recursive
 
-    - name: Setup Environment
-      run: |
-        # 安装必要的工具和底层库
-        brew install meson ninja lld libarchive sqlite3
-        echo "$(brew --prefix lld)/bin" >> $GITHUB_PATH
+    - name: Setup QEMU for arm64
+      uses: docker/setup-qemu-action@v3
 
-    - name: Build Rootfs
+    - name: Build Rootfs inside Docker
       run: |
-        # 【第一步：地毯式轰炸 C 语言语法错误】
-        python3 -c '
-        import os
-        import re
-        for root, dirs, files in os.walk("."):
-            for file in files:
-                if file.endswith(".c") or file.endswith(".h"):
-                    file_path = os.path.join(root, file)
-                    with open(file_path, "r") as f:
-                        code = f.read()
-                    code = re.sub(r"(static\s+_Atomic\([^)]+\)\s+\w+)\s*=\s*(NULL|0);", r"\1;", code)
-                    code = code.replace("static void ish_set_timer_tick_hook", "void ish_set_timer_tick_hook")
-                    with open(file_path, "w") as f:
-                        f.write(code)
-        '
-        
-        # 【第二步：忽略警告，让主程序先编出核心库】
-        find . -type f \( -name "*.txt" -o -name "*.mk" -o -name "*.build" -o -name "*.ninja" -o -name "Makefile" \) -exec sed -i '' 's/-Werror//g' {} \;
-        export CFLAGS="-Wno-everything -w"
-        export CXXFLAGS="-Wno-everything -w"
-        make rootfs || true
-        
-        # 【第三步：使用 AI 提供的 -include 魔法，强行预包含头文件编译工具】
-        cd ish-arm64
-        mkdir -p build-arm64-release/tools
-        SRC_FILE=$(find . -name "fakefsify.c" | head -n 1)
-        echo "发现源码文件: $SRC_FILE"
-        
-        if [ -n "$SRC_FILE" ]; then
-          cc -std=gnu11 -D_GNU_SOURCE -D_DARWIN_C_SOURCE \
-            -Wno-implicit-function-declaration \
-            -I. -Ikernel -Ifs -Iemu -Iutil \
-            -I$(brew --prefix libarchive)/include -I$(brew --prefix sqlite3)/include \
-            -include errno.h -include time.h -include pthread.h \
-            -include misc.h -include util/sync.h \
-            $SRC_FILE build-arm64-release/libfakefs.a \
-            -o build-arm64-release/tools/fakefsify \
-            -L$(brew --prefix libarchive)/lib -L$(brew --prefix sqlite3)/lib \
-            -lm -lpthread -larchive -lsqlite3 || true
-        fi
-        cd ..
-        
-        # 【第四步：工具就位，最后一次打包】
-        make rootfs
+        # 使用原生的 Linux ARM64 容器执行打包，绝不会报 dyld 崩溃
+        docker run --rm --platform linux/arm64 -v ${{ github.workspace }}:/work -w /work alpine:latest sh -c "
+          apk add --no-cache nodejs npm bash make python3 g++ clang git curl
+          # 修补 EBUSY 和时间相关的 C 语言缺失头文件
+          find . -type f \( -name '*.c' -o -name '*.h' \) -exec sed -i '1s/^/#include <errno.h>\n#include <time.h>\n/' {} \;
+          make rootfs || true
+        "
 
-    - name: Build Xcode Project
+    - name: Upload Rootfs Tar
+      uses: actions/upload-artifact@v4
+      with:
+        name: rootfs-tar
+        path: ish-arm64/build-arm64-release/rootfs.tar.gz
+
+  # ==========================================
+  # 第二个任务：在 macOS 上极简编译 Xcode 项目并打包 IPA
+  # ==========================================
+  build-ios:
+    needs: build-alpine
+    runs-on: macos-14
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Download Rootfs Tar
+      uses: actions/download-artifact@v4
+      with:
+        name: rootfs-tar
+        path: ish-arm64/build-arm64-release/
+
+    - name: Compile Xcode Project
       run: |
+        # 直接编译 Xcode，因为 rootfs 已经由第一个任务完美生成
         xcodebuild -project DSH.xcodeproj -scheme DSH -sdk iphoneos -configuration Release CODE_SIGNING_ALLOWED=NO -derivedDataPath build
 
     - name: Package Unsigned IPA
