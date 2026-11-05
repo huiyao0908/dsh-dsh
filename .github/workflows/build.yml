@@ -5,7 +5,7 @@ on:
 
 jobs:
   build-rootfs:
-    # 仅公开仓库免费；私有仓库改成 ubuntu-latest（x86 上跑 arm64 guest 可能更不稳）
+    # 仅公开仓库免费；私有仓库改成 ubuntu-latest
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout Repository
@@ -19,7 +19,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y meson ninja-build clang gcc g++ make python3 \
-            curl tar xz-utils git libarchive-dev libsqlite3-dev
+            curl tar xz-utils git libarchive-dev libsqlite3-dev lld llvm
+          which ld.lld clang
+          ld.lld --version
 
       - name: Build Rootfs
         shell: bash
