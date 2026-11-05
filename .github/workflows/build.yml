@@ -20,7 +20,7 @@ jobs:
 
     - name: Build Rootfs
       run: |
-        # 【第一步：地毯式轰炸所有 C 语言语法错误】
+        # 【第一步：地毯式轰炸 C 语言语法错误】
         python3 -c '
         import os
         import re
@@ -41,14 +41,19 @@ jobs:
         export CFLAGS="-Wno-everything -w"
         export CXXFLAGS="-Wno-everything -w"
         
-        # 【第三步：让它先跑，就算报错也强行继续往下走】
+        # 【第三步：让内核先跑完（报错也继续）】
         make rootfs || true
         
-        # 【第四步：全盘寻找那个缺失的 fakefsify 工具，并硬塞到它想要的地方】
-        mkdir -p ish-arm64/build-arm64-release/tools
-        find ish-arm64 -name "fakefsify" -type f -exec cp {} ish-arm64/build-arm64-release/tools/ \; || true
+        # 【第四步：强行单独编译 fakefsify 工具并塞进去】
+        cd ish-arm64
+        meson setup build-tools -Dguest_arch=arm64 -Dbuildtype=release || true
+        ninja -C build-tools fakefsify || ninja -C build-tools tools/fakefsify || true
         
-        # 【第五步：有了工具，再跑最后一次打包！】
+        # 全方位无死角寻找并搬运
+        find . -name "fakefsify" -type f -exec cp {} build-arm64-release/tools/ \; || true
+        cd ..
+        
+        # 【第五步：万事俱备，最后一次打包】
         make rootfs
 
     - name: Build Xcode Project
