@@ -24,23 +24,16 @@ jobs:
         python3 -c '
         import os
         import re
-
         for root, dirs, files in os.walk("."):
             for file in files:
                 if file.endswith(".c") or file.endswith(".h"):
                     file_path = os.path.join(root, file)
                     with open(file_path, "r") as f:
                         code = f.read()
-                    
-                    # 绝杀1：匹配所有 static _Atomic(...) 变量 = NULL 或 = 0，直接删掉等号后面的部分
                     code = re.sub(r"(static\s+_Atomic\([^)]+\)\s+\w+)\s*=\s*(NULL|0);", r"\1;", code)
-                    
-                    # 绝杀2：解决 calls.c 里的静态冲突
                     code = code.replace("static void ish_set_timer_tick_hook", "void ish_set_timer_tick_hook")
-                    
                     with open(file_path, "w") as f:
                         f.write(code)
-                    print(f"已修补文件: {file_path}")
         '
         
         # 【第二步：强行忽略警告】
@@ -48,7 +41,15 @@ jobs:
         export CFLAGS="-Wno-everything -w"
         export CXXFLAGS="-Wno-everything -w"
         
-        # 【第三步：开始编译】
+        # 【第三步：手动去底层把缺失的 fakefsify 工具编译出来，并塞进它需要的文件夹】
+        cd ish-arm64
+        make tools || true
+        mkdir -p build-arm64-release/tools
+        # 全盘找一下这个工具到底生成在哪了，找到就复制过去
+        find . -name "fakefsify" -type f -exec cp {} build-arm64-release/tools/ \;
+        cd ..
+        
+        # 【第四步：开始最后一次 Rootfs 打包】
         make rootfs
 
     - name: Build Xcode Project
