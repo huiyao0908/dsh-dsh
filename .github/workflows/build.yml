@@ -20,25 +20,31 @@ jobs:
 
     - name: Build Rootfs
       run: |
-        # 【第一步：用 Python 智能修补 C 语言源代码】
+        # 【第一步：用 Python 全盘搜索并修补 C 语言源代码】
         python3 -c '
+        import os
         import re
-        file_path = "kernel/calls.c"
-        with open(file_path, "r") as f:
-            code = f.read()
-            
-        # 1. 精准恢复被破坏的变量声明，并去掉非法的 = 0
-        code = re.sub(r"static _Atomic\(ish_timer_tick_hook_t\)\s*g_timer_tick_hook\s*(=\s*[^;]+)?;", "static _Atomic(ish_timer_tick_hook_t) g_timer_tick_hook;", code)
-        
-        # 2. 修复静态与非静态声明冲突（删掉函数前面的 static）
-        code = code.replace("static void ish_set_timer_tick_hook", "void ish_set_timer_tick_hook")
-        
-        with open(file_path, "w") as f:
-            f.write(code)
-        print("代码修补完成！")
+
+        # 递归寻找所有的 calls.c
+        for root, dirs, files in os.walk("."):
+            for file in files:
+                if file == "calls.c":
+                    file_path = os.path.join(root, file)
+                    with open(file_path, "r") as f:
+                        code = f.read()
+                    
+                    # 1. 修复静态原子变量初始化
+                    code = re.sub(r"static\s+_Atomic\(ish_timer_tick_hook_t\)\s*g_timer_tick_hook\s*(=\s*[^;]+)?;", "static _Atomic(ish_timer_tick_hook_t) g_timer_tick_hook;", code)
+                    
+                    # 2. 修复静态与非静态声明冲突
+                    code = code.replace("static void ish_set_timer_tick_hook", "void ish_set_timer_tick_hook")
+                    
+                    with open(file_path, "w") as f:
+                        f.write(code)
+                    print(f"成功修补文件: {file_path}")
         '
         
-        # 【第二步：强行忽略所有烦人的报错警告】
+        # 【第二步：强行忽略警告】
         find . -type f \( -name "*.txt" -o -name "*.mk" -o -name "*.build" -o -name "*.ninja" -o -name "Makefile" \) -exec sed -i '' 's/-Werror//g' {} \;
         export CFLAGS="-Wno-everything -w"
         export CXXFLAGS="-Wno-everything -w"
