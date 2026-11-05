@@ -36,24 +36,25 @@ jobs:
                         f.write(code)
         '
         
-        # 【第二步：强行忽略警告】
+        # 【第二步：忽略警告，先让它把核心库文件编出来（报错也继续）】
         find . -type f \( -name "*.txt" -o -name "*.mk" -o -name "*.build" -o -name "*.ninja" -o -name "Makefile" \) -exec sed -i '' 's/-Werror//g' {} \;
         export CFLAGS="-Wno-everything -w"
         export CXXFLAGS="-Wno-everything -w"
-        
-        # 【第三步：让内核先跑完（报错也继续）】
         make rootfs || true
         
-        # 【第四步：强行单独编译 fakefsify 工具并塞进去】
+        # 【第三步：手工锻造！绕过构建系统，直接编译 fakefsify 工具】
         cd ish-arm64
-        meson setup build-tools -Dguest_arch=arm64 -Dbuildtype=release || true
-        ninja -C build-tools fakefsify || ninja -C build-tools tools/fakefsify || true
+        mkdir -p build-arm64-release/tools
+        SRC_FILE=$(find . -name "fakefsify.c" | head -n 1)
+        echo "发现源码文件: $SRC_FILE"
         
-        # 全方位无死角寻找并搬运
-        find . -name "fakefsify" -type f -exec cp {} build-arm64-release/tools/ \; || true
+        if [ -n "$SRC_FILE" ]; then
+          # 强行用 cc 链接核心库 libfakefs.a 来编译这个工具
+          cc -I. -Ikernel -Ifs -Iemu $SRC_FILE build-arm64-release/libfakefs.a -o build-arm64-release/tools/fakefsify -lm -lpthread || true
+        fi
         cd ..
         
-        # 【第五步：万事俱备，最后一次打包】
+        # 【第四步：工具就位，最后一次打包】
         make rootfs
 
     - name: Build Xcode Project
