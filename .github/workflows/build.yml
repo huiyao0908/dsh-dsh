@@ -10,10 +10,13 @@ jobs:
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
     - name: Setup Environment
       run: |
-        brew install meson ninja
+        brew install meson ninja lld
+        echo "$(brew --prefix lld)/bin" >> $GITHUB_PATH
 
     - name: Build Rootfs
       run: make rootfs
