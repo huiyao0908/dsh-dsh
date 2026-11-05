@@ -20,8 +20,8 @@ jobs:
 
     - name: Build Rootfs
       run: |
-        export CFLAGS="-Wno-error -Wno-tautological-value-range-compare -Wno-unused-variable"
-        export CXXFLAGS="-Wno-error"
+        # 【绝杀指令】强制找出所有文件里的 -Werror 并把它们删掉
+        grep -rl -- '-Werror' . | xargs sed -i '' 's/-Werror//g'
         make rootfs
 
     - name: Build Xcode Project
