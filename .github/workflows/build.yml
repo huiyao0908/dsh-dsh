@@ -1,0 +1,35 @@
+name: Build dsh-ios
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Setup Environment
+      run: |
+        brew install meson ninja
+
+    - name: Build Rootfs
+      run: make rootfs
+
+    - name: Build Xcode Project
+      run: |
+        xcodebuild -project DSH.xcodeproj -scheme DSH -sdk iphoneos -configuration Release CODE_SIGNING_ALLOWED=NO -derivedDataPath build
+
+    - name: Package Unsigned IPA
+      run: |
+        mkdir -p Payload
+        cp -r build/Build/Products/Release-iphoneos/DSH.app Payload/
+        zip -r DSH-Unsigned.ipa Payload
+
+    - name: Upload IPA Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: DSH-Unsigned-IPA
+        path: DSH-Unsigned.ipa
