@@ -4,67 +4,148 @@ on:
   workflow_dispatch:
 
 jobs:
-  # ==========================================
-  # 第一个任务：在 Ubuntu 上跑 Docker 构造完美的 Linux 环境
-  # ==========================================
-  build-alpine:
-    runs-on: ubuntu-latest
+  # ==========================================================
+  # Job 1: Linux arm64 上构建 rootfs（原生 arm64，不用 QEMU）
+  # 注意：ubuntu-24.04-arm 仅对公开仓库免费。
+  # 私有仓库请改成: runs-on: ubuntu-latest，并取消下面 QEMU 步骤的注释。
+  # ==========================================================
+  build-rootfs:
+    runs-on: ubuntu-24.04-arm
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
-      with:
-        submodules: recursive
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-    - name: Setup QEMU for arm64
-      uses: docker/setup-qemu-action@v3
+      # - name: Setup QEMU for arm64   # 仅 ubuntu-latest(x86) 需要
+      #   uses: docker/setup-qemu-action@v3
 
-    - name: Build Rootfs inside Docker
-      run: |
-        # 使用原生的 Linux ARM64 容器执行打包，绝不会报 dyld 崩溃
-        docker run --rm --platform linux/arm64 -v ${{ github.workspace }}:/work -w /work alpine:latest sh -c "
-          apk add --no-cache nodejs npm bash make python3 g++ clang git curl
-          # 修补 EBUSY 和时间相关的 C 语言缺失头文件
-          find . -type f \( -name '*.c' -o -name '*.h' \) -exec sed -i '1s/^/#include <errno.h>\n#include <time.h>\n/' {} \;
-          make rootfs || true
-        "
+      # TODO: 如果你之前有修复 C 代码的 Python 补丁脚本（_Atomic 等），
+      #       在这里先执行一遍，例如: python3 patch.py
 
-    - name: Upload Rootfs Tar
-      uses: actions/upload-artifact@v4
-      with:
-        name: rootfs-tar
-        path: ish-arm64/build-arm64-release/rootfs.tar.gz
+      - name: Write container script
+        run: |
+          cat > ci-rootfs.sh <<'EOF'
+          #!/bin/sh
+          set -ux
+          apk update
+          apk add --no-cache bash make nodejs npm python3 meson ninja clang gcc g++ \
+            musl-dev linux-headers lld libarchive-dev sqlite-dev curl tar xz git
 
-  # ==========================================
-  # 第二个任务：在 macOS 上极简编译 Xcode 项目并打包 IPA
-  # ==========================================
+          cd /work
+          touch /work/.ci-start
+          mkdir -p /work/ci-out
+
+          # 构建，日志写文件；pipefail 保证 make 失败时能拿到退出码
+          bash -o pipefail -c 'make rootfs 2>&1 | tee /work/rootfs-build.log'
+          MAKE_STATUS=$?
+
+          echo "=== make exit status: $MAKE_STATUS ==="
+
+          # 收集 1：本次构建新生成的 tar 包
+          find /work -type f \( -name '*.tar' -o -name '*.tar.*' -o -name '*.tgz' \) \
+            -newer /work/.ci-start \
+            -not -path '*/node_modules/*' -not -path '/work/ci-out/*' \
+            -exec cp -v {} /work/ci-out/ \;
+
+          # 收集 2：如果产物是 fakefs 目录（含 meta.db），打成 tar
+          for db in $(find /work -name meta.db -newer /work/.ci-start \
+                        -not -path '*/node_modules/*' 2>/dev/null); do
+            d=$(dirname "$db")
+            tar -C "$(dirname "$d")" -cf "/work/ci-out/fakefs-$(basename "$d").tar" "$(basename "$d")"
+          done
+
+          echo "=== ci-out 内容 ==="
+          ls -lh /work/ci-out || true
+
+          # 让宿主机用户能读写这些文件
+          chown -R "$HOST_UID:$HOST_GID" /work || true
+
+          exit $MAKE_STATUS
+          EOF
+
+      - name: Build Rootfs inside Docker
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -e HOST_UID=$(id -u) -e HOST_GID=$(id -g) \
+            -v "${{ github.workspace }}:/work" -w /work \
+            alpine:latest sh /work/ci-rootfs.sh
+
+      - name: Upload Rootfs Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootfs-tar
+          path: ci-out/
+          if-no-files-found: error
+
+      - name: Upload Rootfs Build Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootfs-build-log
+          path: rootfs-build.log
+          if-no-files-found: ignore
+
+  # ==========================================================
+  # Job 2: macOS 上编译 Xcode 工程并打包未签名 IPA
+  # ==========================================================
   build-ios:
-    needs: build-alpine
+    needs: build-rootfs
     runs-on: macos-14
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
-      with:
-        submodules: recursive
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-    - name: Download Rootfs Tar
-      uses: actions/download-artifact@v4
-      with:
-        name: rootfs-tar
-        path: ish-arm64/build-arm64-release/
+      - name: Download Rootfs Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rootfs-tar
+          path: rootfs-artifact/
 
-    - name: Compile Xcode Project
-      run: |
-        # 直接编译 Xcode，因为 rootfs 已经由第一个任务完美生成
-        xcodebuild -project DSH.xcodeproj -scheme DSH -sdk iphoneos -configuration Release CODE_SIGNING_ALLOWED=NO -derivedDataPath build
+      - name: Place Rootfs and Inspect
+        shell: bash
+        run: |
+          ls -R rootfs-artifact | head -50
+          mkdir -p ish-arm64/build-arm64-release
+          cp -R rootfs-artifact/. ish-arm64/build-arm64-release/
+          ls -lh ish-arm64/build-arm64-release | head -50
+          echo "=== Xcode 工程里与 rootfs 相关的引用 ==="
+          grep -n "rootfs\|fakefs" DSH.xcodeproj/project.pbxproj | head -30 || true
 
-    - name: Package Unsigned IPA
-      run: |
-        mkdir -p Payload
-        cp -r build/Build/Products/Release-iphoneos/DSH.app Payload/
-        zip -r DSH-Unsigned.ipa Payload
+      # TODO: 如果 Xcode 工程依赖 macOS 上用 meson 编出的 libish.a / libish_emu.a / libfakefs.a，
+      #       把你之前能跑通的步骤放在这里（brew install meson ninja、Python 补丁脚本、
+      #       meson setup build-arm64-release -Dguest_arch=arm64 --buildtype=release、ninja）。
 
-    - name: Upload IPA Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: DSH-Unsigned-IPA
-        path: DSH-Unsigned.ipa
+      - name: Compile Xcode Project
+        shell: bash
+        run: |
+          xcodebuild -project DSH.xcodeproj -scheme DSH \
+            -sdk iphoneos -configuration Release \
+            CODE_SIGNING_ALLOWED=NO -derivedDataPath build \
+            2>&1 | tee xcodebuild.log
+
+      - name: Package Unsigned IPA
+        shell: bash
+        run: |
+          APP=$(find build/Build/Products -maxdepth 2 -name 'DSH.app' | head -n 1)
+          echo "App: $APP"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qr DSH-Unsigned.ipa Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DSH-Unsigned-IPA
+          path: DSH-Unsigned.ipa
+          if-no-files-found: error
+
+      - name: Upload Xcode Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: xcodebuild.log
+          if-no-files-found: ignore
