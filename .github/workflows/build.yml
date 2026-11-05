@@ -4,12 +4,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  # ==========================================================
-  # Job 1: Linux arm64 上构建 rootfs（原生 arm64，不用 QEMU）
-  # 注意：ubuntu-24.04-arm 仅对公开仓库免费。
-  # 私有仓库请改成: runs-on: ubuntu-latest，并取消下面 QEMU 步骤的注释。
-  # ==========================================================
   build-rootfs:
+    # 仅公开仓库免费；私有仓库改成 ubuntu-latest（x86 上跑 arm64 guest 可能更不稳）
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout Repository
@@ -17,59 +13,42 @@ jobs:
         with:
           submodules: recursive
 
-      # - name: Setup QEMU for arm64   # 仅 ubuntu-latest(x86) 需要
-      #   uses: docker/setup-qemu-action@v3
+      # TODO: 如果有修复 C 代码的 Python 补丁脚本，放在这里执行
 
-      # TODO: 如果你之前有修复 C 代码的 Python 补丁脚本（_Atomic 等），
-      #       在这里先执行一遍，例如: python3 patch.py
-
-      - name: Write container script
+      - name: Install dependencies
         run: |
-          cat > ci-rootfs.sh <<'EOF'
-          #!/bin/sh
-          set -ux
-          apk update
-          apk add --no-cache bash make nodejs npm python3 meson ninja clang gcc g++ \
-            musl-dev linux-headers lld libarchive-dev sqlite-dev curl tar xz git
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build clang gcc g++ make python3 \
+            curl tar xz-utils git libarchive-dev libsqlite3-dev
 
-          cd /work
-          touch /work/.ci-start
-          mkdir -p /work/ci-out
+      - name: Build Rootfs
+        shell: bash
+        run: |
+          touch .ci-start
+          mkdir -p ci-out
 
-          # 构建，日志写文件；pipefail 保证 make 失败时能拿到退出码
-          bash -o pipefail -c 'make rootfs 2>&1 | tee /work/rootfs-build.log'
-          MAKE_STATUS=$?
-
+          set +e
+          make rootfs 2>&1 | tee rootfs-build.log
+          MAKE_STATUS=${PIPESTATUS[0]}
+          set -e
           echo "=== make exit status: $MAKE_STATUS ==="
 
-          # 收集 1：本次构建新生成的 tar 包
-          find /work -type f \( -name '*.tar' -o -name '*.tar.*' -o -name '*.tgz' \) \
-            -newer /work/.ci-start \
-            -not -path '*/node_modules/*' -not -path '/work/ci-out/*' \
-            -exec cp -v {} /work/ci-out/ \;
+          # 收集本次新生成的 tar 包
+          find . -type f \( -name '*.tar' -o -name '*.tar.*' -o -name '*.tgz' \) \
+            -newer .ci-start \
+            -not -path '*/node_modules/*' -not -path './ci-out/*' -not -path './.git/*' \
+            -exec cp -v {} ci-out/ \;
 
-          # 收集 2：如果产物是 fakefs 目录（含 meta.db），打成 tar
-          for db in $(find /work -name meta.db -newer /work/.ci-start \
-                        -not -path '*/node_modules/*' 2>/dev/null); do
+          # 如果产物是 fakefs 目录（含 meta.db），打成 tar
+          for db in $(find . -name meta.db -newer .ci-start \
+                        -not -path '*/node_modules/*' -not -path './.git/*' 2>/dev/null); do
             d=$(dirname "$db")
-            tar -C "$(dirname "$d")" -cf "/work/ci-out/fakefs-$(basename "$d").tar" "$(basename "$d")"
+            tar -C "$(dirname "$d")" -cf "ci-out/fakefs-$(basename "$d").tar" "$(basename "$d")"
           done
 
-          echo "=== ci-out 内容 ==="
-          ls -lh /work/ci-out || true
-
-          # 让宿主机用户能读写这些文件
-          chown -R "$HOST_UID:$HOST_GID" /work || true
-
+          echo "=== ci-out ==="
+          ls -lh ci-out || true
           exit $MAKE_STATUS
-          EOF
-
-      - name: Build Rootfs inside Docker
-        run: |
-          docker run --rm --platform linux/arm64 \
-            -e HOST_UID=$(id -u) -e HOST_GID=$(id -g) \
-            -v "${{ github.workspace }}:/work" -w /work \
-            alpine:latest sh /work/ci-rootfs.sh
 
       - name: Upload Rootfs Artifact
         uses: actions/upload-artifact@v4
@@ -86,9 +65,6 @@ jobs:
           path: rootfs-build.log
           if-no-files-found: ignore
 
-  # ==========================================================
-  # Job 2: macOS 上编译 Xcode 工程并打包未签名 IPA
-  # ==========================================================
   build-ios:
     needs: build-rootfs
     runs-on: macos-14
@@ -111,12 +87,10 @@ jobs:
           mkdir -p ish-arm64/build-arm64-release
           cp -R rootfs-artifact/. ish-arm64/build-arm64-release/
           ls -lh ish-arm64/build-arm64-release | head -50
-          echo "=== Xcode 工程里与 rootfs 相关的引用 ==="
           grep -n "rootfs\|fakefs" DSH.xcodeproj/project.pbxproj | head -30 || true
 
-      # TODO: 如果 Xcode 工程依赖 macOS 上用 meson 编出的 libish.a / libish_emu.a / libfakefs.a，
-      #       把你之前能跑通的步骤放在这里（brew install meson ninja、Python 补丁脚本、
-      #       meson setup build-arm64-release -Dguest_arch=arm64 --buildtype=release、ninja）。
+      # TODO: 如果 Xcode 工程需要 macOS 上 meson 编出的 libish.a 等库，
+      #       把之前能跑通的 meson/ninja 步骤放在这里
 
       - name: Compile Xcode Project
         shell: bash
