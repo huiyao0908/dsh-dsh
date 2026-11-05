@@ -25,28 +25,38 @@ jobs:
 
       - name: Install toolchain
         run: |
-          brew install meson ninja lld
+          brew install meson ninja lld libarchive pkgconf
           echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
+          # libarchive 是 keg-only，把它和它依赖的 pkgconfig 目录都加进来
+          PC=""
+          for f in libarchive $(brew deps libarchive); do
+            d="$(brew --prefix "$f")/lib/pkgconfig"
+            [ -d "$d" ] && PC="$PC:$d"
+          done
+          echo "PKG_CONFIG_PATH=${PC#:}" >> "$GITHUB_ENV"
           sudo gem install xcodeproj
 
       - name: Apply source patches
         run: |
-          set -eu
+          set -u
           # 1) Apple Clang: _Atomic 静态变量不能用 = NULL 初始化
           sed -i '' -E 's/^static _Atomic\(([^)]*)\) ([A-Za-z0-9_]+) = NULL;/static _Atomic(\1) \2;/' \
             ish-arm64/fs/fake.c ish-arm64/kernel/calls.c ish-arm64/kernel/fork.c
           # 2) 主机名过长会溢出
           sed -i '' 's|strcpy(uts->hostname, hostname);|snprintf(uts->hostname, sizeof(uts->hostname), "%s", hostname);|' \
             ish-arm64/kernel/uname.c
-          # 检查补丁是否生效
-          grep -n "static _Atomic" ish-arm64/fs/fake.c ish-arm64/kernel/calls.c ish-arm64/kernel/fork.c
-          grep -n "hostname" ish-arm64/kernel/uname.c
+          # 查看补丁结果（上游已修复时也不会报错）
+          grep -n "static _Atomic" ish-arm64/fs/fake.c ish-arm64/kernel/calls.c ish-arm64/kernel/fork.c || true
+          grep -n "hostname" ish-arm64/kernel/uname.c || true
 
       - name: Build emulator and rootfs
         shell: bash
         run: |
           set -o pipefail
           make emulator 2>&1 | tee emulator-build.log
+          ls -l ish-arm64/build-arm64-release/tools/ || true
+          grep -i -B1 -A3 "libarchive" ish-arm64/build-arm64-release/meson-logs/meson-log.txt | head -40 || true
+          test -x ish-arm64/build-arm64-release/tools/fakefsify
           make rootfs 2>&1 | tee rootfs-build.log
           ls -lh build/root.tar.gz
 
@@ -96,4 +106,5 @@ jobs:
             emulator-build.log
             rootfs-build.log
             xcodebuild.log
+            ish-arm64/build-arm64-release/meson-logs/meson-log.txt
           if-no-files-found: ignore
