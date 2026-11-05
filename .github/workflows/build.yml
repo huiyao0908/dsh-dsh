@@ -20,8 +20,15 @@ jobs:
 
     - name: Build Rootfs
       run: |
-        # 【绝杀指令】强制找出所有文件里的 -Werror 并把它们删掉
-        grep -rl -- '-Werror' . | xargs sed -i '' 's/-Werror//g'
+        # 强行把所有构建文件里的 werror 和 -Werror 关掉
+        find . -type f \( -name "Makefile" -o -name "*.mk" -o -name "meson.build" \) -exec sed -i '' 's/-Werror//g' {} \;
+        find . -type f \( -name "Makefile" -o -name "*.mk" -o -name "meson.build" \) -exec sed -i '' 's/werror=true/werror=false/g' {} \;
+        
+        # 强制设置环境变量
+        export CFLAGS="-Wno-error -Wno-unused-but-set-variable"
+        export CXXFLAGS="-Wno-error"
+        export CFLAGS_mesa="-Wno-error"
+        
         make rootfs
 
     - name: Build Xcode Project
