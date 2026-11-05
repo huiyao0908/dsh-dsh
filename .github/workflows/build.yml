@@ -15,7 +15,8 @@ jobs:
 
     - name: Setup Environment
       run: |
-        brew install meson ninja lld
+        # 安装必要的工具和底层库
+        brew install meson ninja lld libarchive sqlite3
         echo "$(brew --prefix lld)/bin" >> $GITHUB_PATH
 
     - name: Build Rootfs
@@ -36,21 +37,29 @@ jobs:
                         f.write(code)
         '
         
-        # 【第二步：忽略警告，先让它把核心库文件编出来（报错也继续）】
+        # 【第二步：忽略警告，让主程序先编出核心库】
         find . -type f \( -name "*.txt" -o -name "*.mk" -o -name "*.build" -o -name "*.ninja" -o -name "Makefile" \) -exec sed -i '' 's/-Werror//g' {} \;
         export CFLAGS="-Wno-everything -w"
         export CXXFLAGS="-Wno-everything -w"
         make rootfs || true
         
-        # 【第三步：手工锻造！绕过构建系统，直接编译 fakefsify 工具】
+        # 【第三步：使用 AI 提供的 -include 魔法，强行预包含头文件编译工具】
         cd ish-arm64
         mkdir -p build-arm64-release/tools
         SRC_FILE=$(find . -name "fakefsify.c" | head -n 1)
         echo "发现源码文件: $SRC_FILE"
         
         if [ -n "$SRC_FILE" ]; then
-          # 强行用 cc 链接核心库 libfakefs.a 来编译这个工具
-          cc -I. -Ikernel -Ifs -Iemu $SRC_FILE build-arm64-release/libfakefs.a -o build-arm64-release/tools/fakefsify -lm -lpthread || true
+          cc -std=gnu11 -D_GNU_SOURCE -D_DARWIN_C_SOURCE \
+            -Wno-implicit-function-declaration \
+            -I. -Ikernel -Ifs -Iemu -Iutil \
+            -I$(brew --prefix libarchive)/include -I$(brew --prefix sqlite3)/include \
+            -include errno.h -include time.h -include pthread.h \
+            -include misc.h -include util/sync.h \
+            $SRC_FILE build-arm64-release/libfakefs.a \
+            -o build-arm64-release/tools/fakefsify \
+            -L$(brew --prefix libarchive)/lib -L$(brew --prefix sqlite3)/lib \
+            -lm -lpthread -larchive -lsqlite3 || true
         fi
         cd ..
         
