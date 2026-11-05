@@ -41,15 +41,14 @@ jobs:
         export CFLAGS="-Wno-everything -w"
         export CXXFLAGS="-Wno-everything -w"
         
-        # 【第三步：手动去底层把缺失的 fakefsify 工具编译出来，并塞进它需要的文件夹】
-        cd ish-arm64
-        make tools || true
-        mkdir -p build-arm64-release/tools
-        # 全盘找一下这个工具到底生成在哪了，找到就复制过去
-        find . -name "fakefsify" -type f -exec cp {} build-arm64-release/tools/ \;
-        cd ..
+        # 【第三步：让它先跑，就算报错也强行继续往下走】
+        make rootfs || true
         
-        # 【第四步：开始最后一次 Rootfs 打包】
+        # 【第四步：全盘寻找那个缺失的 fakefsify 工具，并硬塞到它想要的地方】
+        mkdir -p ish-arm64/build-arm64-release/tools
+        find ish-arm64 -name "fakefsify" -type f -exec cp {} ish-arm64/build-arm64-release/tools/ \; || true
+        
+        # 【第五步：有了工具，再跑最后一次打包！】
         make rootfs
 
     - name: Build Xcode Project
