@@ -20,28 +20,27 @@ jobs:
 
     - name: Build Rootfs
       run: |
-        # 【第一步：用 Python 全盘搜索并修补 C 语言源代码】
+        # 【第一步：地毯式轰炸所有 C 语言语法错误】
         python3 -c '
         import os
         import re
 
-        # 递归寻找所有的 calls.c
         for root, dirs, files in os.walk("."):
             for file in files:
-                if file == "calls.c":
+                if file.endswith(".c") or file.endswith(".h"):
                     file_path = os.path.join(root, file)
                     with open(file_path, "r") as f:
                         code = f.read()
                     
-                    # 1. 修复静态原子变量初始化
-                    code = re.sub(r"static\s+_Atomic\(ish_timer_tick_hook_t\)\s*g_timer_tick_hook\s*(=\s*[^;]+)?;", "static _Atomic(ish_timer_tick_hook_t) g_timer_tick_hook;", code)
+                    # 绝杀1：匹配所有 static _Atomic(...) 变量 = NULL 或 = 0，直接删掉等号后面的部分
+                    code = re.sub(r"(static\s+_Atomic\([^)]+\)\s+\w+)\s*=\s*(NULL|0);", r"\1;", code)
                     
-                    # 2. 修复静态与非静态声明冲突
+                    # 绝杀2：解决 calls.c 里的静态冲突
                     code = code.replace("static void ish_set_timer_tick_hook", "void ish_set_timer_tick_hook")
                     
                     with open(file_path, "w") as f:
                         f.write(code)
-                    print(f"成功修补文件: {file_path}")
+                    print(f"已修补文件: {file_path}")
         '
         
         # 【第二步：强行忽略警告】
